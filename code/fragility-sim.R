@@ -285,15 +285,17 @@ for (i in seq_len(1000)) {
 # Convert fixed parameters to factors
 df <- df %>%
   mutate_at(
-    vars(power, c_y, t_y, arr, rrr, n, ate),
+    vars(power, c_y, t_y, arr, rrr, n),
     factor
   )
 
 trial <- trial %>%
   mutate_at(
-    vars(power, c_y, t_y, arr, rrr, n, ate),
+    vars(power),
     factor
   )
+
+save(df, trial, file = "./data/sim.RData")
 
 # Figures
 figure_1 <- df %>%
@@ -302,7 +304,7 @@ figure_1 <- df %>%
   geom_jitter(shape = 1, width = 0.2, height = 0, alpha = 0.5, aes(x = 0)) +
   geom_boxplot(alpha = 0.25, outlier.alpha = 0) +
   facet_grid(rows = vars(power),
-             cols = vars(ARR),
+             cols = vars(arr),
              labeller = label_both,
              scales = "free_x") +
   inspectEHR::theme_cchic() +
@@ -344,25 +346,6 @@ figure_2 <- df %>%
 ggsave(filename = "./figures/figure2.svg", plot = figure_2, height = 3, width = 9)
 ggsave(filename = "./figures/figure2.png", plot = figure_2, height = 3, width = 9)
 
-
-mod1 <- df %>%
-  filter(reverse_effect == FALSE) %>%
-  lm(fragility ~ n * ns(log(p_value), 3), data = .)
-
-summary(mod1)
-AIC(mod1)
-
-df %>%
-  filter(reverse_effect == FALSE) %>%
-  mutate(pred = predict(mod1)) %>%
-  ggplot(aes(x = fragility, y = pred)) + geom_point(alpha = 0.2) +
-  geom_abline(slope = 1, intercept = 0, linetype = 2) +
-  ylab("Predicted Fragility Index") +
-  xlab("Calculated Fragility Index") +
-  inspectEHR::theme_cchic()
-
-ggsave("./predict.png", height = 4, width = 6)
-
 # Predicting the FI ====
 
 # I want to build the case that the FI is a transformation of the p value
@@ -370,13 +353,16 @@ ggsave("./predict.png", height = 4, width = 6)
 # the trial directly, without having to do the fishers exact test procedure
 
 # Niave analysis ----
-niave_p <- trial %>%
+niave_p <- df %>%
   filter(reverse_effect == FALSE) %>%
   lm(fragility ~ p_value, data = .)
 
-niave_n <- trial %>%
+niave_n <- df %>%
   filter(reverse_effect == FALSE) %>%
   lm(fragility ~ n, data = .)
+
+summary(niave_p)
+summary(niave_n)
 
 # Obviously there is no relationship here. This is for 2 reasons:
 # - the p value needs to be transformed
@@ -385,8 +371,8 @@ niave_n <- trial %>%
 
 good_mod <- trial %>%
   filter(reverse_effect == FALSE) %>%
-  mutate(log_p = log(p_value)) %>%
-  lm(fragility ~ n + n:arr + n:log_p + arr:log_p + n:arr:log_p, data = .)
+  mutate(logp = log(p_value)) %>%
+  lm(fragility ~ n + n:arr + n:logp + arr:logp + n:arr:logp, data = .)
 
 left_plot <- trial %>%
   filter(reverse_effect == FALSE) %>%
@@ -410,7 +396,6 @@ right_plot <- trial %>%
 
 multiplot(plots = list(left_plot, right_plot), cols = 2, file = "./figures/figure3.svg")
 multiplot(plots = list(left_plot, right_plot), cols = 2, file = "./figures/figure3.png")
-
 
 ## Extract Coefficients
 equatiomatic::extract_eq(good_mod)
