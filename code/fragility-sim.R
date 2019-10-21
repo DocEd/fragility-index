@@ -1,5 +1,11 @@
+## This is the main script for the manuscript on the fragility index
+## Authors:
+## - Code - Edward Palmer, @DocEd (github)
+## - Manuscript - Edward Palmer, Giampiero Marra, Mervyn Singer
+## If you find any erros or would like to discuss the paper in more
+## detail, please do get in touch.
+
 library(tidyverse)
-library(splines)
 # Note: need inspectEHR for custom ggplot theme
 # can install using:
 # devtools::install_github("cchic/inspectEHR")
@@ -7,57 +13,45 @@ library(splines)
 
 set.seed(2019)
 
-# Helper functions ====
+#' Calculate Average Treatment Effect
+#' 
+#' returns the average treatment effect given treatment assignment in a
+#' randomised scenario
+#'
+#' @param t treatment assignment (must be 0 or 1)
+#' @param y outcome (must be 0 or 1)
 ate_calc <- function(t, y) {
-  (sum(y[t == 0]) - sum(y[t == 1]))/length(y)
+  mean(y[t == 1]) - mean(y[t == 0])
 }
 
-# Multiple plot function
-#
-# ggplot objects can be passed in to plots (as a list of ggplot objects)
-# - cols:   Number of columns in layout
-# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
-#
-# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
-# then plot 1 will go in the upper left, 2 will go in the upper right, and
-# 3 will go all the way across the bottom.
-multiplot <- function(plots = NULL, file, cols = 1, layout = NULL) {
-  require(grid)
-  
-  n_plots <- length(plots)
-  
-  # If layout is NULL, then use 'cols' to determine layout
-  if (is.null(layout)) {
-    # Make the panel
-    # ncol: Number of columns of plots
-    # nrow: Number of rows needed, calculated from # of cols
-    layout <- matrix(seq(1, cols * ceiling(n_plots/cols)),
-                     ncol = cols, nrow = ceiling(n_plots/cols))
-  }
-  
-  if (n_plots == 1) {
-    rlang::abort("There is only 1 plot, don't use this function")
-    
-  } else {
-    # Set up the page
-    grid.newpage()
-    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
-    
-    # Make each plot, in the correct location
-    for (i in seq_len(n_plots)) {
-      # Get the i,j matrix positions of the regions that contain this subplot
-      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
-      
-      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
-                                      layout.pos.col = matchidx$col))
-    }
-  }
-}
-
-# Simulator Function ====
+#' Simulate Fragility Index
+#' 
+#' This is the workhorse function of the script. It calculates the appropriate
+#' number of subjects for a given effect size (specified as a control and
+#' intervention mortality), power and alpha. Simulations are repeated a default
+#' 1000 times (set by sims). Alternately, one can override this behaviour by
+#' specifiying the number of subjects directly (set by N).
+#' 
+#' The `permit_negative` refers to whether or not you want the FI to return
+#' values for when the starting p value is alreadyv > 0.05.
+#' 
+#' A data frame is returned with list columns containing the original treatment
+#' allocations and outcomes. A number of other metrics are returned, some
+#' observed, some defined apriori. A column specifying `reverse_effect`
+#' identifies cases where the reverse effect was present (i.e. harm observed
+#' in the treatment arm). These cases should either be excluded, or flipped for
+#' them to be valid.
+#'
+#' @param intervention_mort treatment arm mortality (probability scalar)
+#' @param power desired statistical power (probability scalar)
+#' @param control_mort control arm mortality (probability scalar)
+#' @param n manual selection of subjects in total (overrides other settings)
+#' @param sims number of sims to run (default 1000)
+#' @param alpha pre-fixed alpha level to run fragility index
+#' @param permit_negative allow negative fragility index
 simulate_fragility <- function(intervention_mort,
-                               control_mort,
                                power = 0.8,
+                               control_mort,
                                n = NULL,
                                sims = 1000,
                                alpha = 0.05,
@@ -115,11 +109,11 @@ simulate_fragility <- function(intervention_mort,
     # Outcome WITH treatment, note 1 = death, 0 = survive
     # Bernoilli trial with p = intervention_mortality
     y[treatment] <- rbinom(n = n/2, size = 1, prob = intervention_mort)
-    
+    oyt <- mean(y[t == 1])
     # Outcome WITHOUT treatment, note 1 = death, 0 = survive
     # Bernoilli trial with p = control_mortality
     y[-treatment] <- rbinom(n = n/2, size = 1, prob = control_mort)
-    
+    oyc <- mean(y[t == 0])
     # Test the difference in groups
     test <- chisq.test(y, t)
     p <- p_value[i] <- test$p.value
@@ -217,7 +211,9 @@ simulate_fragility <- function(intervention_mort,
   df <- df %>%
     mutate(power = power,
            c_y = control_mort,
+           oc_y = oyc,
            t_y = intervention_mort,
+           ot_y = oyt,
            arr = control_mort-intervention_mort,
            rrr = (control_mort-intervention_mort)/control_mort,
            n = n,
@@ -227,124 +223,94 @@ simulate_fragility <- function(intervention_mort,
 }
 
 # Core Scenarios ====
-scenarios <- expand.grid(c(0.02, 0.1, 0.2), c(0.7, 0.8, 0.9))
+scenarios <- as_tibble(expand.grid(c(0.25, 0.2, 0.15), c(0.7, 0.8, 0.9)))
+names(scenarios) <- c("int_mort", "power")
 
-for (i in seq_len(nrow(scenarios))) {
-  if (i == 1L) {
-    df <- simulate_fragility(
-      intervention_mort = 0.4-scenarios[i, 1],
-      control_mort = 0.4,
-      power = scenarios[i, 2],
-      permit_negative = TRUE)
-  } else {
-    df <- bind_rows(
-      df,
-      simulate_fragility(
-        intervention_mort = 0.4-scenarios[i, 1],
-        control_mort = 0.4,
-        power = scenarios[i, 2],
-        permit_negative = TRUE))
-  }
-}
-
+dt <- map2_dfr(
+  .x = scenarios$int_mort,
+  .y = scenarios$power,
+  .f = ~ simulate_fragility(.x, .y, control_mort = 0.3, permit_negative = TRUE)
+  )
 
 # Simulations of single RCTs ====
 
 ## We also want to recreate what would happen should we see lots of RCTs
 ## each with their own effect size, power and sample size. These represent
-## the "single draws" of a frequency statistic that we get to observe
-## when performing an RCT
-for (i in seq_len(1000)) {
-  cm <- rbeta(1, 2, 8)
-  rrr <- rbeta(1, 2, 8)
-  arr <- cm * rrr
-  im <- cm - arr
-  pwr <- sample(c(0.7, 0.8, 0.9), size = 1)
-  if (i == 1) {
-    trial <- simulate_fragility(
-      intervention_mort = im,
-      control_mort = cm,
-      power = pwr,
-      sims = 1,
-      permit_negative = TRUE
-    )
-  } else {
-    new_trial <- simulate_fragility(
-      intervention_mort = im,
-      control_mort = cm,
-      power = pwr,
-      sims = 1,
-      permit_negative = TRUE
-    )
-    trial <- bind_rows(
-      trial, new_trial
-    )
-  }
-}
+## the "single draws" of a frequency statistic (i.e. p value) that we get to
+## observe when performing an RCT
+
+df <- tibble(
+  cm = rbeta(1000, 2, 15),
+  rrr = runif(1000, 0.1, 0.5),
+  arr = cm * rrr,
+  im = cm - arr,
+  pwr = sample(c(0.7, 0.8, 0.9), size = 1000, replace = TRUE)
+  )
+
+dx <- pmap_dfr(
+  .l = list(
+    df$im,
+    df$pwr,
+    df$cm
+  ),
+  .f = ~ simulate_fragility(..., permit_negative = TRUE, sims = 1)
+)
 
 # Convert fixed parameters to factors
-df <- df %>%
+dt <- dt %>%
   mutate_at(
     vars(power, c_y, t_y, arr, rrr, n),
     factor
   )
 
-trial <- trial %>%
+dt <- rename(dt, `absolute risk reduction` = arr)
+
+dx <- dx %>%
   mutate_at(
     vars(power),
     factor
   )
 
-save(df, trial, file = "./data/sim.RData")
+save(dt, dx, file = "./data/sim.RData")
 
 # Figures
-figure_1 <- df %>%
+# Note, figure 1 is the detail of the FI procedure.
+figure_2 <- dt %>%
   filter(reverse_effect == FALSE) %>%
   ggplot(aes(y = fragility)) +
-  geom_jitter(shape = 1, width = 0.2, height = 0, alpha = 0.5, aes(x = 0)) +
-  geom_boxplot(alpha = 0.25, outlier.alpha = 0) +
+  #geom_jitter(shape = 1, width = 0.2, height = 0, alpha = 0.5, aes(x = 0)) +
+  geom_boxplot(outlier.alpha = 0.25) +
+  geom_hline(yintercept = 0, linetype = 2) +
   facet_grid(rows = vars(power),
-             cols = vars(arr),
-             labeller = label_both,
-             scales = "free_x") +
+             cols = vars(`absolute risk reduction`),
+             labeller = label_both) +
   inspectEHR::theme_cchic() +
-  theme(text = element_text(family = "Helvetica"),
-        axis.title.y = element_blank(),
-        axis.text.y = element_blank(),
-        axis.ticks.y = element_blank()) +
+  theme(
+    panel.background = element_rect(fill = "grey80", colour = "white"),
+    text = element_text(family = "Helvetica"),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()) +
   ylab("Fragility Index") +
   coord_flip()
 
-ggsave(filename = "./figures/figure1.svg", plot = figure_1, height = 3, width = 9)
-ggsave(filename = "./figures/figure1.png", plot = figure_1, height = 3, width = 9)
-
-# df %>%
-#   filter(reverse_effect == FALSE) %>%
-#   ggplot(aes(x = p_value, y = fragility)) +
-#   facet_grid(cols = vars(power), labeller = label_both) +
-#   geom_point(
-#     shape = 1, alpha = 0.25,
-#     aes(colour = arr)) +
-#   inspectEHR::theme_cchic() +
-#   labs(colour = "Abolute Risk Reduction") +
-#   ylab("Fragility Index") +
-#   xlab("P Value") +
-#   theme(text = element_text(family = "Helvetica"))
+ggsave(filename = "./figures/figure2.svg", plot = figure_2, height = 3, width = 9)
+ggsave(filename = "./figures/figure2.png", plot = figure_2, height = 3, width = 9)
 
 # Use 80% power for a clean exemplar
-figure_2 <- df %>%
+figure_3 <- dt %>%
   filter(reverse_effect == FALSE,
          power == "0.8") %>%
   ggplot(aes(x = p_value, y = fragility)) +
-  geom_point(shape = 1, alpha = 0.5, aes(colour = arr)) +
+  geom_point(shape = 1, alpha = 0.5, aes(colour = `absolute risk reduction`)) +
   inspectEHR::theme_cchic() +
   labs(colour = "Abolute Risk Reduction") +
   ylab("Fragility Index") +
   xlab("P Value") +
   theme(text = element_text(family = "Helvetica"))
 
-ggsave(filename = "./figures/figure2.svg", plot = figure_2, height = 3, width = 9)
-ggsave(filename = "./figures/figure2.png", plot = figure_2, height = 3, width = 9)
+ggsave(filename = "./figures/figure3.svg", plot = figure_3, height = 3, width = 9)
+ggsave(filename = "./figures/figure3.png", plot = figure_3, height = 3, width = 9)
 
 # Predicting the FI ====
 
@@ -353,39 +319,41 @@ ggsave(filename = "./figures/figure2.png", plot = figure_2, height = 3, width = 
 # the trial directly, without having to do the fishers exact test procedure
 
 # Niave analysis ----
-niave_p <- df %>%
+niave_p <- dx %>%
   filter(reverse_effect == FALSE) %>%
   lm(fragility ~ p_value, data = .)
 
-niave_n <- df %>%
+niave_n <- dx %>%
   filter(reverse_effect == FALSE) %>%
   lm(fragility ~ n, data = .)
 
 summary(niave_p)
 summary(niave_n)
 
-# Obviously there is no relationship here. This is for 2 reasons:
+# There is "no relationship" here. This is for 2 reasons:
 # - the p value needs to be transformed
 # - this is a multivariable problem (because multiple study designs map onto the
 #   same p value) and so we need to include some of the study design elements
 
-good_mod <- trial %>%
+good_mod <- dx %>%
   filter(reverse_effect == FALSE) %>%
+  filter(fragility > 0) %>%
   mutate(logp = log(p_value)) %>%
-  lm(fragility ~ n + n:arr + n:logp + arr:logp + n:arr:logp, data = .)
+  lm(fragility ~ ate*logp*n*oc_y, data = .)
 
-left_plot <- trial %>%
-  filter(reverse_effect == FALSE) %>%
-  ggplot(aes(x = fragility, y = n)) +
-  geom_abline(slope = 1, intercept = 0, linetype = 2) +
-  geom_smooth(method = "lm") +
-  geom_point(alpha = 0.2) +
-  ylab("Study Sample Size") +
-  xlab("Calculated Fragility Index") +
-  inspectEHR::theme_cchic()
+good_mod %>%
+  broom::tidy() %>%
+  mutate(l95 = confint(good_mod)[,1],
+         u95 = confint(good_mod)[,2])
 
-right_plot <- trial %>%
-  filter(reverse_effect == FALSE) %>%
+summary(good_mod)
+
+## Not used in study, but its clear there is a perfect reclaiming of the FI here
+
+dx %>%
+  filter(
+    reverse_effect == FALSE,
+    fragility > 0) %>%
   mutate(prediction = predict(good_mod)) %>%
   ggplot(aes(x = fragility, y = prediction)) +
   geom_abline(slope = 1, intercept = 0, linetype = 2) +
@@ -394,8 +362,4 @@ right_plot <- trial %>%
   xlab("Calculated Fragility Index") +
   inspectEHR::theme_cchic()
 
-multiplot(plots = list(left_plot, right_plot), cols = 2, file = "./figures/figure3.svg")
-multiplot(plots = list(left_plot, right_plot), cols = 2, file = "./figures/figure3.png")
-
-## Extract Coefficients
-equatiomatic::extract_eq(good_mod)
+## And we're done.
